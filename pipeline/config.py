@@ -33,7 +33,8 @@ TARGET_DELTAS: list[int] = list(range(5, 100, 5))
 # Parquet column names — matched to the step-2 (clean_SPX) output schema
 # ---------------------------------------------------------------------------
 COLS: dict[str, str] = {
-    "timestamp":        "timestamp",         # ISO-8601 string "2026-01-02T09:35:00.000"
+    "trade_date":       "trade_date",        # object / str  "2026-01-02"
+    "quote_time":       "quote_time",        # object / str  "09:35:00"
     "strike":           "strike",            # float64
     "option_type":      "right",             # str: 'C' or 'P'
     "settlement":       "settlement",        # str: 'AM' or 'PM'
@@ -41,7 +42,6 @@ COLS: dict[str, str] = {
     "ask":              "ask",               # float64
     "iv":               "implied_vol",       # float64, decimal (0.25 = 25%)
     "underlying_price": "underlying_price",  # float64 — SPX spot price
-    "trade_date":       "trade_date",        # object (date string)
     "dte":              "dte",               # int64 — calendar DTE from step 2
 }
 

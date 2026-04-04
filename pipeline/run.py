@@ -127,10 +127,13 @@ def load_trade_date(entries: list[dict]) -> pd.DataFrame:
 
     combined = pd.concat(frames, ignore_index=True)
 
-    # Parse the ISO-string timestamp column ("2026-01-02T09:35:00.000")
-    ts_col = COLS["timestamp"]
-    if ts_col in combined.columns:
-        combined[ts_col] = pd.to_datetime(combined[ts_col], format="ISO8601")
+    # Build a proper datetime from the already-split trade_date + quote_time columns.
+    # Stored as "_ts" to avoid collision with any existing "timestamp" column.
+    date_col = COLS["trade_date"]
+    time_col = COLS["quote_time"]
+    combined["_ts"] = pd.to_datetime(
+        combined[date_col].astype(str) + " " + combined[time_col].astype(str)
+    )
 
     return combined
 
@@ -265,15 +268,14 @@ def process_date(trade_date: date, conn: psycopg2.extensions.connection) -> None
 
     ensure_partitions(conn, trade_date.isoformat())
 
-    ts_col = COLS["timestamp"]
-    timestamps = sorted(combined[ts_col].unique())
+    timestamps = sorted(combined["_ts"].unique())
     logger.info("  %d snapshots, %d expiry/session combos",
                 len(timestamps), combined.groupby(["_expiry", "_session"]).ngroups)
 
     total_surface = total_atm = 0
 
     for ts in timestamps:
-        snap_df = combined[combined[ts_col] == ts]
+        snap_df = combined[combined["_ts"] == ts]
         snap_ts = pd.Timestamp(ts)
 
         try:
