@@ -1,0 +1,390 @@
+"""
+Pipeline entry point.
+
+File discovery (folders use YYYYMMDD format, no dashes — matches step-1/2 output):
+    DATA_ROOT/
+        YYYYMMDD/             ← trade_date
+            YYYYMMDD/         ← expiry
+                PM.parquet    ← session (SPXW weeklies / PM-settled monthlies)
+                AM.parquet    (SPX monthlies — occasional)
+
+Each parquet file covers one (trade_date, expiry, session) combination but
+contains rows for multiple intraday timestamps.
+
+Processing flow per trade_date:
+  1. Load all parquet files → one combined DataFrame tagged with expiry + session
+  2. Group by timestamp → process each snapshot independently
+  3. Per snapshot:
+     a. For every expiry (all sessions): clean + fit → FitResult + diagnostics row
+     b. Calendar-arb check across PM fits
+     c. sample_surface() using PM fits only
+     d. Compute Greeks
+     e. Write surface, ATM, diagnostics to PostgreSQL
+
+Batch mode:   process a date range
+Incremental:  find the latest trade_date already in the DB, process everything after
+
+Usage:
+    python -m pipeline.run batch  --start 2024-01-01 --end 2024-12-31
+    python -m pipeline.run incremental
+    python -m pipeline.run init-db
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+import pandas as pd
+import psycopg2
+
+from .clean import prepare_expiry
+from .config import COLS, DATA_ROOT, TARGET_DELTAS, TARGET_DTES
+from .fit import FitResult, annotate_calendar_arb, fit_smile
+from .greeks import enrich_surface_rows
+from .sample import sample_surface
+from .store import (
+    ensure_partitions, get_connection, init_db,
+    upsert_atm, upsert_diagnostics, upsert_surface,
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s — %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# File discovery
+# ---------------------------------------------------------------------------
+
+def discover_trade_date(trade_date: date) -> list[dict]:
+    """
+    Scan DATA_ROOT/<YYYYMMDD>/ and return a list of dicts:
+        { "expiry": date, "session": "AM"|"PM", "path": Path }
+
+    Folder names use compact YYYYMMDD format (no dashes), matching the
+    step-1 (Thetadata_Raw_SPX) and step-2 (clean_SPX) output layout.
+    """
+    trade_dir = DATA_ROOT / trade_date.strftime("%Y%m%d")
+    if not trade_dir.is_dir():
+        return []
+
+    entries = []
+    for expiry_dir in sorted(trade_dir.iterdir()):
+        if not expiry_dir.is_dir():
+            continue
+        try:
+            expiry = datetime.strptime(expiry_dir.name, "%Y%m%d").date()
+        except ValueError:
+            continue   # skip non-date folders
+
+        for session in ("PM", "AM"):
+            path = expiry_dir / f"{session}.parquet"
+            if path.exists():
+                entries.append({"expiry": expiry, "session": session, "path": path})
+
+    return entries
+
+
+# ---------------------------------------------------------------------------
+# Data loading
+# ---------------------------------------------------------------------------
+
+def load_parquet(path: Path) -> pd.DataFrame:
+    return pd.read_parquet(path)
+
+
+def load_trade_date(entries: list[dict]) -> pd.DataFrame:
+    """
+    Load all parquet files for a trade_date and tag each row with
+    `_expiry` (Timestamp) and `_session` (str).
+
+    _session is taken from the parquet's `settlement` column when present
+    (most reliable), falling back to the filename-derived value.
+    Returns a combined DataFrame.
+    """
+    frames = []
+    for entry in entries:
+        df = load_parquet(entry["path"])
+        df["_expiry"] = pd.Timestamp(entry["expiry"])
+
+        # Prefer the in-data settlement column (already computed by step 2)
+        settlement_col = COLS.get("settlement", "settlement")
+        if settlement_col in df.columns:
+            df["_session"] = df[settlement_col].astype(str).str.upper().str.strip()
+        else:
+            df["_session"] = entry["session"]
+
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+
+    # Parse the ISO-string timestamp column ("2026-01-02T09:35:00.000")
+    ts_col = COLS["timestamp"]
+    if ts_col in combined.columns:
+        combined[ts_col] = pd.to_datetime(combined[ts_col], format="ISO8601")
+
+    return combined
+
+
+# ---------------------------------------------------------------------------
+# Per-snapshot processing
+# ---------------------------------------------------------------------------
+
+def _build_diag_row(
+    timestamp: pd.Timestamp,
+    trade_date: date,
+    expiry: date,
+    session: str,
+    fit: FitResult,
+    n_raw: int,
+    n_clean: int,
+) -> dict:
+    return {
+        "timestamp":          timestamp,
+        "trade_date":         trade_date.isoformat(),
+        "expiry":             expiry.isoformat(),
+        "expiry_type":        session,          # 'AM' or 'PM'
+        "dte_actual":         fit.T * 365.0,
+        "forward_price":      fit.F if not fit.skipped else None,
+        "risk_free_rate":     fit.r if not fit.skipped else None,
+        "n_strikes_raw":      n_raw,
+        "n_strikes_clean":    n_clean,
+        "spline_rmse":        fit.rmse if not fit.skipped else None,
+        "calendar_arb_flag":  fit.calendar_arb,
+        "butterfly_arb_flag": fit.butterfly_arb,
+        "skipped":            fit.skipped,
+        "skip_reason":        fit.skip_reason or None,
+    }
+
+
+def process_snapshot(
+    snapshot_df: pd.DataFrame,
+    snapshot_ts: pd.Timestamp,
+    trade_date: date,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """
+    Process all expiries at a single snapshot timestamp.
+
+    Returns:
+        surface_rows  — for spx_surface (with Greeks added)
+        atm_rows      — for spx_atm
+        diag_rows     — for spx_surface_diagnostics
+    """
+    diag_rows:    list[dict]     = []
+    pm_fits:      list[FitResult] = []
+    all_fits:     list[tuple]    = []   # (fit, expiry, session, n_raw, n_clean)
+
+    # Group by expiry+session and fit each independently
+    for (expiry_ts, session), group in snapshot_df.groupby(["_expiry", "_session"]):
+        expiry = expiry_ts.date()
+        is_am  = (session == "AM")
+
+        try:
+            prepared = prepare_expiry(group, snapshot_ts, expiry_ts, is_am)
+            fit      = fit_smile(prepared)
+            n_raw    = prepared["n_raw"]
+            n_clean  = prepared["n_clean"]
+        except ValueError as exc:
+            # Build a skipped FitResult so we still write a diagnostics row
+            df_len = len(group)
+            fit    = FitResult(
+                spline=None, T=0.0, F=0.0, r=0.0,
+                skipped=True, skip_reason=str(exc),
+            )
+            n_raw = n_clean = df_len
+
+        all_fits.append((fit, expiry, session, n_raw, n_clean))
+
+        if session == "PM" and not fit.skipped:
+            pm_fits.append(fit)
+
+    # Calendar-arb check across PM fits (annotates each fit in-place)
+    annotate_calendar_arb(pm_fits)
+
+    # Build diagnostics rows for every expiry
+    for fit, expiry, session, n_raw, n_clean in all_fits:
+        diag_rows.append(
+            _build_diag_row(snapshot_ts, trade_date, expiry, session,
+                            fit, n_raw, n_clean)
+        )
+
+    # Sample surface using PM fits only
+    surface_rows, atm_rows = sample_surface(
+        pm_fits, target_dtes=TARGET_DTES, target_deltas=TARGET_DELTAS
+    )
+
+    # Add timestamp + trade_date to surface and ATM rows
+    for row in surface_rows:
+        row["timestamp"]  = snapshot_ts
+        row["trade_date"] = trade_date.isoformat()
+
+    for row in atm_rows:
+        row["timestamp"]  = snapshot_ts
+        row["trade_date"] = trade_date.isoformat()
+
+    # Compute Greeks in-place
+    enrich_surface_rows(surface_rows)
+
+    # Strip internal-only fields before storage
+    _surface_keep = {"timestamp", "trade_date", "dte", "put_delta",
+                     "iv", "price", "theta", "vega", "gamma"}
+    surface_rows = [{k: v for k, v in r.items() if k in _surface_keep}
+                    for r in surface_rows]
+
+    return surface_rows, atm_rows, diag_rows
+
+
+# ---------------------------------------------------------------------------
+# Per-date processing
+# ---------------------------------------------------------------------------
+
+def process_date(trade_date: date, conn: psycopg2.extensions.connection) -> None:
+    """
+    Load all data for trade_date, iterate over snapshots, and write results.
+    """
+    logger.info("Processing %s", trade_date.isoformat())
+
+    entries = discover_trade_date(trade_date)
+    if not entries:
+        logger.warning("No parquet files found for %s", trade_date.isoformat())
+        return
+
+    combined = load_trade_date(entries)
+    if combined.empty:
+        logger.warning("All files empty for %s", trade_date.isoformat())
+        return
+
+    ensure_partitions(conn, trade_date.isoformat())
+
+    ts_col = COLS["timestamp"]
+    timestamps = sorted(combined[ts_col].unique())
+    logger.info("  %d snapshots, %d expiry/session combos",
+                len(timestamps), combined.groupby(["_expiry", "_session"]).ngroups)
+
+    total_surface = total_atm = 0
+
+    for ts in timestamps:
+        snap_df = combined[combined[ts_col] == ts]
+        snap_ts = pd.Timestamp(ts)
+
+        try:
+            surface_rows, atm_rows, diag_rows = process_snapshot(
+                snap_df, snap_ts, trade_date
+            )
+        except Exception as exc:
+            logger.error("Snapshot %s failed unexpectedly: %s", ts, exc)
+            continue
+
+        upsert_surface(conn, surface_rows)
+        upsert_atm(conn, atm_rows)
+        upsert_diagnostics(conn, diag_rows)
+
+        total_surface += len(surface_rows)
+        total_atm     += len(atm_rows)
+
+    logger.info("  Done: %d surface rows, %d ATM rows", total_surface, total_atm)
+
+
+# ---------------------------------------------------------------------------
+# Batch mode
+# ---------------------------------------------------------------------------
+
+def batch_run(start: date, end: date) -> None:
+    """Process all trade dates in [start, end] inclusive."""
+    with get_connection() as conn:
+        d = start
+        while d <= end:
+            try:
+                process_date(d, conn)
+            except Exception as exc:
+                logger.error("Date %s failed: %s", d.isoformat(), exc)
+            d += timedelta(days=1)
+
+
+# ---------------------------------------------------------------------------
+# Incremental mode
+# ---------------------------------------------------------------------------
+
+def _latest_processed_date(conn: psycopg2.extensions.connection) -> date | None:
+    """Return the most recent trade_date in spx_surface_diagnostics, or None."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT MAX(trade_date) FROM spx_surface_diagnostics")
+        row = cur.fetchone()
+    return row[0] if row and row[0] else None
+
+
+def incremental_run() -> None:
+    """
+    Find the latest processed date, then process every date from the day after
+    through today.
+    """
+    with get_connection() as conn:
+        latest = _latest_processed_date(conn)
+
+    if latest is None:
+        logger.warning(
+            "No processed dates found in diagnostics table. "
+            "Run in batch mode with an explicit --start date."
+        )
+        return
+
+    start = latest + timedelta(days=1)
+    end   = date.today()
+
+    if start > end:
+        logger.info("Already up to date (latest: %s)", latest.isoformat())
+        return
+
+    logger.info("Incremental run: %s → %s", start.isoformat(), end.isoformat())
+    batch_run(start, end)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="SPX options surface interpolation pipeline"
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # init-db
+    sub.add_parser("init-db", help="Create tables and functions in PostgreSQL")
+
+    # batch
+    batch_p = sub.add_parser("batch", help="Process a date range")
+    batch_p.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
+    batch_p.add_argument("--end",   required=True, help="End date YYYY-MM-DD")
+
+    # incremental
+    sub.add_parser("incremental", help="Process dates since last run")
+
+    args = parser.parse_args()
+
+    if args.command == "init-db":
+        init_db()
+
+    elif args.command == "batch":
+        start = date.fromisoformat(args.start)
+        end   = date.fromisoformat(args.end)
+        if start > end:
+            logger.error("--start must be ≤ --end")
+            sys.exit(1)
+        batch_run(start, end)
+
+    elif args.command == "incremental":
+        incremental_run()
+
+
+if __name__ == "__main__":
+    main()
