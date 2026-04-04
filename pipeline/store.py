@@ -9,14 +9,47 @@ Handles:
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 
+import numpy as np
 import psycopg2
 import psycopg2.extras
 
 from .config import DB_URL
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# NumPy scalar sanitisation
+# ---------------------------------------------------------------------------
+
+def _sanitize_row(row: dict) -> dict:
+    """
+    Convert numpy scalars to Python-native types before passing to psycopg2.
+
+    NumPy >= 2.0 changed repr(np.float64(x)) to 'np.float64(x)' instead of
+    just 'x'. psycopg2 falls back to repr() for unregistered types, which
+    causes PostgreSQL to see literal text like 'np.float64(2.46)' and fail
+    with 'schema "np" does not exist'.
+
+    Also maps NaN and Inf to None (→ NULL) to avoid invalid SQL literals.
+    """
+    result = {}
+    for k, v in row.items():
+        if isinstance(v, np.floating):
+            f = float(v)
+            result[k] = None if not math.isfinite(f) else f
+        elif isinstance(v, np.integer):
+            result[k] = int(v)
+        elif isinstance(v, np.bool_):
+            result[k] = bool(v)
+        elif isinstance(v, float) and not math.isfinite(v):
+            result[k] = None
+        else:
+            result[k] = v
+    return result
 
 _SCHEMA_PATH = Path(__file__).parent.parent / "sql" / "schema.sql"
 
@@ -70,22 +103,6 @@ _SURFACE_UPSERT = """
 INSERT INTO spx_surface
     (timestamp, trade_date, dte, put_delta, iv, price, theta, vega, gamma)
 VALUES
-    %(timestamp)s, %(trade_date)s, %(dte)s, %(put_delta)s,
-    %(iv)s, %(price)s, %(theta)s, %(vega)s, %(gamma)s
-)
-ON CONFLICT (trade_date, timestamp, dte, put_delta)
-DO UPDATE SET
-    iv    = EXCLUDED.iv,
-    price = EXCLUDED.price,
-    theta = EXCLUDED.theta,
-    vega  = EXCLUDED.vega,
-    gamma = EXCLUDED.gamma
-"""
-
-_SURFACE_UPSERT = """
-INSERT INTO spx_surface
-    (timestamp, trade_date, dte, put_delta, iv, price, theta, vega, gamma)
-VALUES
     (%(timestamp)s, %(trade_date)s, %(dte)s, %(put_delta)s,
      %(iv)s, %(price)s, %(theta)s, %(vega)s, %(gamma)s)
 ON CONFLICT (trade_date, timestamp, dte, put_delta)
@@ -110,7 +127,9 @@ def upsert_surface(
     if not rows:
         return
     with conn.cursor() as cur:
-        psycopg2.extras.execute_batch(cur, _SURFACE_UPSERT, rows, page_size=1000)
+        psycopg2.extras.execute_batch(
+            cur, _SURFACE_UPSERT, [_sanitize_row(r) for r in rows], page_size=1000
+        )
     conn.commit()
 
 
@@ -140,7 +159,9 @@ def upsert_atm(
     if not rows:
         return
     with conn.cursor() as cur:
-        psycopg2.extras.execute_batch(cur, _ATM_UPSERT, rows, page_size=500)
+        psycopg2.extras.execute_batch(
+            cur, _ATM_UPSERT, [_sanitize_row(r) for r in rows], page_size=500
+        )
     conn.commit()
 
 
@@ -184,5 +205,7 @@ def upsert_diagnostics(
     if not rows:
         return
     with conn.cursor() as cur:
-        psycopg2.extras.execute_batch(cur, _DIAG_UPSERT, rows, page_size=500)
+        psycopg2.extras.execute_batch(
+            cur, _DIAG_UPSERT, [_sanitize_row(r) for r in rows], page_size=500
+        )
     conn.commit()
