@@ -21,7 +21,7 @@ DB_URL = os.environ.get("SPX_DB_URL", "postgresql://user:password@localhost:5432
 # Surface grid
 # ---------------------------------------------------------------------------
 TARGET_DTES: list[int] = [
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 21, 30, 45, 60, 90, 120, 180, 270, 360
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 21, 30, 45, 60, 90, 120, 180, 270, 360
 ]
 
 # Integer put deltas 5-95 (unified convention).
@@ -84,6 +84,11 @@ PCP_MONEYNESS_BAND: float = 0.15  # use strikes within ±15% of F
 # Sanity bounds for implied risk-free rate (annualised, continuous)
 R_MIN: float = -0.05  # -5%
 R_MAX: float = 0.20   # 20%
+
+# Fallback rate used when PCP regression is unreliable (e.g. very short-dated
+# expiries where T is tiny and the slope is indistinguishable from -1).
+# Used together with underlying_price to form an approximate forward F.
+R_DEFAULT: float = 0.05
 
 # ---------------------------------------------------------------------------
 # Spline fitting

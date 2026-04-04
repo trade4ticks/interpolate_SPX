@@ -10,6 +10,8 @@ For each expiry at a given snapshot timestamp:
 """
 from __future__ import annotations
 
+import math
+import logging
 from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
@@ -17,12 +19,14 @@ import numpy as np
 import pandas as pd
 from scipy.stats import linregress
 
+logger = logging.getLogger(__name__)
+
 from .config import (
     AM_EXPIRY_HOUR, AM_EXPIRY_MINUTE,
     COLS, MAX_IV, MAX_SPREAD_RATIO, MIN_BID, MIN_IV,
     MIN_OPTION_PRICE, MIN_STRIKES_FOR_FIT, MINUTES_PER_YEAR,
     PCP_MONEYNESS_BAND, PM_EXPIRY_HOUR, PM_EXPIRY_MINUTE,
-    R_MAX, R_MIN, STEP2_FLAG_COLS,
+    R_DEFAULT, R_MAX, R_MIN, STEP2_FLAG_COLS,
 )
 
 ET = ZoneInfo("America/New_York")
@@ -266,7 +270,24 @@ def prepare_expiry(
             f"Only {n_clean} clean quotes — need ≥ {MIN_STRIKES_FOR_FIT}"
         )
 
-    F, r = compute_forward_rate(clean, T)
+    try:
+        F, r = compute_forward_rate(clean, T)
+    except ValueError as exc:
+        # For short-dated expiries (small T) the PCP regression slope is
+        # indistinguishable from -1 and noise dominates the rate estimate.
+        # Fall back: use underlying_price as an approximate spot price and
+        # derive F with a default rate. The carry error is < 0.1% for T < 0.03.
+        up_col = COLS["underlying_price"]
+        if up_col not in clean.columns or clean[up_col].isna().all():
+            raise
+        S = float(clean[up_col].median())
+        r = R_DEFAULT
+        F = S * math.exp(r * T)
+        logger.debug(
+            "PCP fallback (T=%.4f): using underlying_price F=%.2f r=%.4f — %s",
+            T, F, r, exc,
+        )
+
     surface_df = compute_surface_inputs(clean, F, T)
 
     if len(surface_df) < MIN_STRIKES_FOR_FIT:

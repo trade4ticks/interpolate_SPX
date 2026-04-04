@@ -38,6 +38,36 @@ from .fit import FitResult
 # Interpolated smile at a target T
 # ---------------------------------------------------------------------------
 
+class DirectSmile:
+    """
+    Wraps a single FitResult for use at 0 DTE (same-day expiry).
+    The 0 DTE target can't be bracketed from below, so we use the nearest
+    expiry's fitted smile directly rather than interpolating in time.
+    target_T is the actual T of that expiry at this snapshot — it changes
+    throughout the trading day as expiry approaches.
+    """
+
+    def __init__(self, fit: FitResult) -> None:
+        self.fit      = fit
+        self.target_T = fit.T
+        self.F        = fit.F
+        self.r        = fit.r
+        self.k_min    = fit.k_min
+        self.k_max    = fit.k_max
+
+    def w(self, k: float | np.ndarray) -> float | np.ndarray:
+        arr = np.atleast_1d(np.asarray(k, dtype=float))
+        result = np.maximum(self.fit.evaluate(arr), 1e-12)
+        return float(result[0]) if np.ndim(k) == 0 else result
+
+    def iv(self, k: float) -> float:
+        w_val = self.w(k)
+        return float(np.sqrt(max(w_val / self.target_T, 1e-12)))
+
+    def strike(self, k: float) -> float:
+        return float(self.F * np.exp(k))
+
+
 class InterpolatedSmile:
     """
     Linear interpolation in total-variance space between two expiry fits.
@@ -239,22 +269,29 @@ def sample_surface(
     atm_rows:     list[dict] = []
 
     for dte_int in target_dtes:
-        target_T = dte_int / 365.0   # calendar days convention
 
-        # Find bracketing pair
-        lo: Optional[FitResult] = None
-        hi: Optional[FitResult] = None
+        # 0 DTE: use the nearest (same-day) expiry directly — no time interpolation.
+        # Its actual T changes throughout the day as expiry approaches.
+        if dte_int == 0:
+            smile: DirectSmile | InterpolatedSmile = DirectSmile(usable[0])
+            target_T = smile.target_T
+        else:
+            target_T = dte_int / 365.0   # calendar days convention
 
-        for i in range(len(usable) - 1):
-            if usable[i].T <= target_T <= usable[i + 1].T:
-                lo = usable[i]
-                hi = usable[i + 1]
-                break
+            # Find bracketing pair
+            lo: Optional[FitResult] = None
+            hi: Optional[FitResult] = None
 
-        if lo is None or hi is None:
-            continue   # no bracket — skip this DTE
+            for i in range(len(usable) - 1):
+                if usable[i].T <= target_T <= usable[i + 1].T:
+                    lo = usable[i]
+                    hi = usable[i + 1]
+                    break
 
-        smile = InterpolatedSmile(lo, hi, target_T)
+            if lo is None or hi is None:
+                continue   # no bracket — skip this DTE
+
+            smile = InterpolatedSmile(lo, hi, target_T)
 
         # Delta grid
         delta_results = solve_delta_grid(smile, target_deltas)
