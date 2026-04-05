@@ -78,8 +78,8 @@ def bs_put_greeks(F: float, K: float, T: float, r: float, sigma: float) -> dict:
     # Put price
     price = disc * (K * Nnd2 - F * Nnd1)
 
-    # Vega: ∂V/∂σ  (same formula for put and call)
-    vega  = disc * F * npd1 * sqrt_T
+    # Vega: ∂V/∂σ per 1% change in IV (market convention: divide by 100)
+    vega  = disc * F * npd1 * sqrt_T / 100.0
 
     # Forward Gamma: ∂²V/∂F²
     gamma = disc * npd1 / (F * sigma * sqrt_T)
