@@ -363,11 +363,20 @@ def incremental_run() -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
+def _prompt_date(prompt: str) -> date:
+    while True:
+        raw = input(prompt).strip()
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            print("  Invalid date — please use YYYY-MM-DD format.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="SPX options surface interpolation pipeline"
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     # init-db
     sub.add_parser("init-db", help="Create tables and functions in PostgreSQL")
@@ -381,6 +390,17 @@ def main() -> None:
     sub.add_parser("incremental", help="Process dates since last run")
 
     args = parser.parse_args()
+
+    if not args.command:
+        # Interactive mode: prompt for dates and run batch
+        print("SPX surface pipeline — batch mode")
+        start = _prompt_date("  Start date (YYYY-MM-DD): ")
+        end   = _prompt_date("  End date   (YYYY-MM-DD): ")
+        if start > end:
+            logger.error("Start date must be ≤ end date")
+            sys.exit(1)
+        batch_run(start, end)
+        return
 
     if args.command == "init-db":
         init_db()
