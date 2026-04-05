@@ -101,11 +101,11 @@ def ensure_partitions(conn: psycopg2.extensions.connection, trade_date: str) -> 
 
 _SURFACE_UPSERT = """
 INSERT INTO spx_surface
-    (timestamp, trade_date, dte, put_delta, iv, price, theta, vega, gamma)
+    (trade_date, quote_time, dte, put_delta, iv, price, theta, vega, gamma)
 VALUES
-    (%(timestamp)s, %(trade_date)s, %(dte)s, %(put_delta)s,
+    (%(trade_date)s, %(quote_time)s, %(dte)s, %(put_delta)s,
      %(iv)s, %(price)s, %(theta)s, %(vega)s, %(gamma)s)
-ON CONFLICT (trade_date, timestamp, dte, put_delta)
+ON CONFLICT (trade_date, quote_time, dte, put_delta)
 DO UPDATE SET
     iv    = EXCLUDED.iv,
     price = EXCLUDED.price,
@@ -121,7 +121,7 @@ def upsert_surface(
 ) -> None:
     """
     Bulk-upsert rows into spx_surface.
-    Each row must have: timestamp, trade_date, dte, put_delta, iv,
+    Each row must have: trade_date, quote_time, dte, put_delta, iv,
                         price, theta, vega, gamma.
     """
     if not rows:
@@ -139,16 +139,23 @@ def upsert_surface(
 
 _ATM_UPSERT = """
 INSERT INTO spx_atm
-    (timestamp, trade_date, dte, atm_put_delta, atm_strike, atm_iv, atm_forward)
+    (trade_date, quote_time, dte,
+     atm_put_delta, atm_strike, atm_iv, atm_forward,
+     price, theta, vega, gamma)
 VALUES
-    (%(timestamp)s, %(trade_date)s, %(dte)s,
-     %(atm_put_delta)s, %(atm_strike)s, %(atm_iv)s, %(atm_forward)s)
-ON CONFLICT (trade_date, timestamp, dte)
+    (%(trade_date)s, %(quote_time)s, %(dte)s,
+     %(atm_put_delta)s, %(atm_strike)s, %(atm_iv)s, %(atm_forward)s,
+     %(price)s, %(theta)s, %(vega)s, %(gamma)s)
+ON CONFLICT (trade_date, quote_time, dte)
 DO UPDATE SET
     atm_put_delta = EXCLUDED.atm_put_delta,
     atm_strike    = EXCLUDED.atm_strike,
     atm_iv        = EXCLUDED.atm_iv,
-    atm_forward   = EXCLUDED.atm_forward
+    atm_forward   = EXCLUDED.atm_forward,
+    price         = EXCLUDED.price,
+    theta         = EXCLUDED.theta,
+    vega          = EXCLUDED.vega,
+    gamma         = EXCLUDED.gamma
 """
 
 
@@ -171,19 +178,19 @@ def upsert_atm(
 
 _DIAG_UPSERT = """
 INSERT INTO spx_surface_diagnostics (
-    timestamp, trade_date, expiry, expiry_type,
+    trade_date, quote_time, expiry, expiry_type,
     dte_actual, forward_price, risk_free_rate,
     n_strikes_raw, n_strikes_clean,
     spline_rmse, calendar_arb_flag, butterfly_arb_flag,
     skipped, skip_reason
 ) VALUES (
-    %(timestamp)s, %(trade_date)s, %(expiry)s, %(expiry_type)s,
+    %(trade_date)s, %(quote_time)s, %(expiry)s, %(expiry_type)s,
     %(dte_actual)s, %(forward_price)s, %(risk_free_rate)s,
     %(n_strikes_raw)s, %(n_strikes_clean)s,
     %(spline_rmse)s, %(calendar_arb_flag)s, %(butterfly_arb_flag)s,
     %(skipped)s, %(skip_reason)s
 )
-ON CONFLICT (timestamp, expiry)
+ON CONFLICT (trade_date, quote_time, expiry)
 DO UPDATE SET
     dte_actual         = EXCLUDED.dte_actual,
     forward_price      = EXCLUDED.forward_price,

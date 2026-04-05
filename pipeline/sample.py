@@ -311,11 +311,13 @@ def sample_surface(
         atm = find_atm(smile)
         if atm is not None:
             atm_rows.append({
-                "dte":          dte_int,
+                "dte":           dte_int,
                 "atm_put_delta": atm["atm_put_delta"],
                 "atm_strike":    atm["atm_strike"],
                 "atm_iv":        atm["atm_iv"],
                 "atm_forward":   atm["atm_forward"],
+                "_r":            smile.r,
+                "_T":            target_T,
             })
 
     return surface_rows, atm_rows

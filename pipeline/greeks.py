@@ -100,6 +100,25 @@ def bs_put_greeks(F: float, K: float, T: float, r: float, sigma: float) -> dict:
     }
 
 
+def enrich_atm_rows(atm_rows: list[dict]) -> list[dict]:
+    """
+    Add price, theta, vega, gamma to each ATM row produced by sample.sample_surface().
+
+    Each row contains: dte, atm_put_delta, atm_strike, atm_iv, atm_forward, _r, _T.
+    Returns the same list with greek fields added in-place.
+    """
+    for row in atm_rows:
+        greeks = bs_put_greeks(
+            F     = row["atm_forward"],
+            K     = row["atm_strike"],
+            T     = row["_T"],
+            r     = row["_r"],
+            sigma = row["atm_iv"],
+        )
+        row.update(greeks)
+    return atm_rows
+
+
 def enrich_surface_rows(surface_rows: list[dict]) -> list[dict]:
     """
     Add price, theta, vega, gamma to each row produced by sample.sample_surface().

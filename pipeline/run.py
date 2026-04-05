@@ -43,7 +43,7 @@ import psycopg2
 from .clean import prepare_expiry
 from .config import COLS, DATA_ROOT, TARGET_DELTAS, TARGET_DTES
 from .fit import FitResult, annotate_calendar_arb, fit_smile
-from .greeks import enrich_surface_rows
+from .greeks import enrich_atm_rows, enrich_surface_rows
 from .sample import sample_surface
 from .store import (
     ensure_partitions, get_connection, init_db,
@@ -143,8 +143,8 @@ def load_trade_date(entries: list[dict]) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def _build_diag_row(
-    timestamp: pd.Timestamp,
     trade_date: date,
+    quote_time,
     expiry: date,
     session: str,
     fit: FitResult,
@@ -152,10 +152,10 @@ def _build_diag_row(
     n_clean: int,
 ) -> dict:
     return {
-        "timestamp":          timestamp,
         "trade_date":         trade_date.isoformat(),
+        "quote_time":         quote_time,
         "expiry":             expiry.isoformat(),
-        "expiry_type":        session,          # 'AM' or 'PM'
+        "expiry_type":        session,
         "dte_actual":         fit.T * 365.0,
         "forward_price":      fit.F if not fit.skipped else None,
         "risk_free_rate":     fit.r if not fit.skipped else None,
@@ -213,10 +213,12 @@ def process_snapshot(
     # Calendar-arb check across PM fits (annotates each fit in-place)
     annotate_calendar_arb(pm_fits)
 
+    quote_time = snapshot_ts.time()
+
     # Build diagnostics rows for every expiry
     for fit, expiry, session, n_raw, n_clean in all_fits:
         diag_rows.append(
-            _build_diag_row(snapshot_ts, trade_date, expiry, session,
+            _build_diag_row(trade_date, quote_time, expiry, session,
                             fit, n_raw, n_clean)
         )
 
@@ -225,23 +227,30 @@ def process_snapshot(
         pm_fits, target_dtes=TARGET_DTES, target_deltas=TARGET_DELTAS
     )
 
-    # Add timestamp + trade_date to surface and ATM rows
+    # quote_time already set above when building diag_rows
     for row in surface_rows:
-        row["timestamp"]  = snapshot_ts
         row["trade_date"] = trade_date.isoformat()
+        row["quote_time"] = quote_time
 
     for row in atm_rows:
-        row["timestamp"]  = snapshot_ts
         row["trade_date"] = trade_date.isoformat()
+        row["quote_time"] = quote_time
 
     # Compute Greeks in-place
     enrich_surface_rows(surface_rows)
+    enrich_atm_rows(atm_rows)
 
     # Strip internal-only fields before storage
-    _surface_keep = {"timestamp", "trade_date", "dte", "put_delta",
+    _surface_keep = {"trade_date", "quote_time", "dte", "put_delta",
                      "iv", "price", "theta", "vega", "gamma"}
     surface_rows = [{k: v for k, v in r.items() if k in _surface_keep}
                     for r in surface_rows]
+
+    _atm_keep = {"trade_date", "quote_time", "dte",
+                 "atm_put_delta", "atm_strike", "atm_iv", "atm_forward",
+                 "price", "theta", "vega", "gamma"}
+    atm_rows = [{k: v for k, v in r.items() if k in _atm_keep}
+                for r in atm_rows]
 
     return surface_rows, atm_rows, diag_rows
 
