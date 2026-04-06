@@ -21,6 +21,7 @@ All calculations use forward F and rate r from the bracketing expiries
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import numpy as np
@@ -196,41 +197,29 @@ def solve_delta_grid(
 
 def find_atm(smile: InterpolatedSmile) -> Optional[dict]:
     """
-    Find the true ATM point where the forward put delta equals exactly -0.5,
-    i.e., d1 = 0, i.e., k = 0.5 * w(k).
+    ATM-Forward point: strike = forward (K = F, k = 0).
 
-    This is a fixed-point equation solved with brentq on:
-        f(k) = k - 0.5 * w(k)  == 0   (rearranged from d1 = 0)
+    IV, price, and greeks are evaluated at the forward strike. The put delta
+    at this point is not fixed at -0.5 — it equals N(d1) - 1 with
+        d1 = 0.5 * sqrt(w(0)),
+    so it is slightly more negative than -0.5 (by an amount that grows with
+    total variance).
 
     Returns a dict:
         { "atm_put_delta": float, "atm_strike": float,
           "atm_iv": float, "atm_forward": float }
-    or None if the ATM cannot be bracketed.
     """
-    def residual(k: float) -> float:
-        w_val = smile.w(k)
-        return k - 0.5 * float(w_val)
-
-    k_lo, k_hi = DELTA_SOLVER_K_BOUNDS
-
-    try:
-        if residual(k_lo) * residual(k_hi) > 0:
-            return None
-
-        k_atm = brentq(residual, k_lo, k_hi, xtol=DELTA_SOLVER_XTOL)
-    except ValueError:
-        return None
-
-    w_atm   = smile.w(k_atm)
-    iv_atm  = smile.iv(k_atm)
-    K_atm   = smile.strike(k_atm)
-    d1_atm  = (-k_atm + 0.5 * w_atm) / max(np.sqrt(w_atm), 1e-12)
-    delta_atm = float(norm.cdf(d1_atm) - 1.0)  # should be ≈ -0.5
+    k_atm   = 0.0
+    w_atm   = float(smile.w(k_atm))
+    iv_atm  = float(smile.iv(k_atm))
+    K_atm   = float(smile.strike(k_atm))   # == F by construction
+    d1_atm  = 0.5 * math.sqrt(max(w_atm, 1e-12))
+    delta_atm = float(norm.cdf(d1_atm) - 1.0)
 
     return {
         "atm_put_delta": delta_atm,
-        "atm_strike":    float(K_atm),
-        "atm_iv":        float(iv_atm),
+        "atm_strike":    K_atm,
+        "atm_iv":        iv_atm,
         "atm_forward":   float(smile.F),
     }
 

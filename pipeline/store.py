@@ -140,22 +140,24 @@ def upsert_surface(
 _ATM_UPSERT = """
 INSERT INTO spx_atm
     (trade_date, quote_time, dte,
-     atm_put_delta, atm_strike, atm_iv, atm_forward,
+     atm_put_delta, atm_strike, atm_iv, atm_forward, underlying_price,
      price, theta, vega, gamma)
 VALUES
     (%(trade_date)s, %(quote_time)s, %(dte)s,
      %(atm_put_delta)s, %(atm_strike)s, %(atm_iv)s, %(atm_forward)s,
+     %(underlying_price)s,
      %(price)s, %(theta)s, %(vega)s, %(gamma)s)
 ON CONFLICT (trade_date, quote_time, dte)
 DO UPDATE SET
-    atm_put_delta = EXCLUDED.atm_put_delta,
-    atm_strike    = EXCLUDED.atm_strike,
-    atm_iv        = EXCLUDED.atm_iv,
-    atm_forward   = EXCLUDED.atm_forward,
-    price         = EXCLUDED.price,
-    theta         = EXCLUDED.theta,
-    vega          = EXCLUDED.vega,
-    gamma         = EXCLUDED.gamma
+    atm_put_delta    = EXCLUDED.atm_put_delta,
+    atm_strike       = EXCLUDED.atm_strike,
+    atm_iv           = EXCLUDED.atm_iv,
+    atm_forward      = EXCLUDED.atm_forward,
+    underlying_price = EXCLUDED.underlying_price,
+    price            = EXCLUDED.price,
+    theta            = EXCLUDED.theta,
+    vega             = EXCLUDED.vega,
+    gamma            = EXCLUDED.gamma
 """
 
 

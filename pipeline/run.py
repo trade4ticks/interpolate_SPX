@@ -42,6 +42,8 @@ import psycopg2
 
 from .clean import prepare_expiry
 from .config import COLS, DATA_ROOT, TARGET_DELTAS, TARGET_DTES
+
+_UNDERLYING_COL = COLS["underlying_price"]
 from .fit import FitResult, annotate_calendar_arb, fit_smile
 from .greeks import enrich_atm_rows, enrich_surface_rows
 from .sample import sample_surface
@@ -215,6 +217,13 @@ def process_snapshot(
 
     quote_time = snapshot_ts.time()
 
+    # Spot underlying at this snapshot (same across all expiries for a given ts)
+    underlying_price: float | None = None
+    if _UNDERLYING_COL in snapshot_df.columns:
+        up_series = snapshot_df[_UNDERLYING_COL].dropna()
+        if not up_series.empty:
+            underlying_price = float(up_series.median())
+
     # Build diagnostics rows for every expiry
     for fit, expiry, session, n_raw, n_clean in all_fits:
         diag_rows.append(
@@ -233,8 +242,9 @@ def process_snapshot(
         row["quote_time"] = quote_time
 
     for row in atm_rows:
-        row["trade_date"] = trade_date.isoformat()
-        row["quote_time"] = quote_time
+        row["trade_date"]       = trade_date.isoformat()
+        row["quote_time"]       = quote_time
+        row["underlying_price"] = underlying_price
 
     # Compute Greeks in-place
     enrich_surface_rows(surface_rows)
@@ -248,6 +258,7 @@ def process_snapshot(
 
     _atm_keep = {"trade_date", "quote_time", "dte",
                  "atm_put_delta", "atm_strike", "atm_iv", "atm_forward",
+                 "underlying_price",
                  "price", "theta", "vega", "gamma"}
     atm_rows = [{k: v for k, v in r.items() if k in _atm_keep}
                 for r in atm_rows]
@@ -259,7 +270,11 @@ def process_snapshot(
 # Per-date processing
 # ---------------------------------------------------------------------------
 
-def process_date(trade_date: date, conn: psycopg2.extensions.connection) -> None:
+def process_date(
+    trade_date: date,
+    conn: psycopg2.extensions.connection,
+    atm_only: bool = False,
+) -> None:
     """
     Load all data for trade_date, iterate over snapshots, and write results.
     """
@@ -295,9 +310,10 @@ def process_date(trade_date: date, conn: psycopg2.extensions.connection) -> None
             logger.error("Snapshot %s failed unexpectedly: %s", ts, exc)
             continue
 
-        upsert_surface(conn, surface_rows)
+        if not atm_only:
+            upsert_surface(conn, surface_rows)
+            upsert_diagnostics(conn, diag_rows)
         upsert_atm(conn, atm_rows)
-        upsert_diagnostics(conn, diag_rows)
 
         total_surface += len(surface_rows)
         total_atm     += len(atm_rows)

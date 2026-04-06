@@ -44,10 +44,11 @@ CREATE TABLE IF NOT EXISTS spx_atm (
     trade_date    DATE             NOT NULL,
     quote_time    TIME             NOT NULL,
     dte           SMALLINT         NOT NULL,
-    atm_put_delta DOUBLE PRECISION NOT NULL,
-    atm_strike    DOUBLE PRECISION NOT NULL,
-    atm_iv        DOUBLE PRECISION NOT NULL,
-    atm_forward   DOUBLE PRECISION NOT NULL,
+    atm_put_delta    DOUBLE PRECISION NOT NULL,
+    atm_strike       DOUBLE PRECISION NOT NULL,
+    atm_iv           DOUBLE PRECISION NOT NULL,
+    atm_forward      DOUBLE PRECISION NOT NULL,
+    underlying_price DOUBLE PRECISION,
     price         DOUBLE PRECISION,
     theta         DOUBLE PRECISION,
     vega          DOUBLE PRECISION,
@@ -57,6 +58,10 @@ CREATE TABLE IF NOT EXISTS spx_atm (
 
 CREATE INDEX IF NOT EXISTS spx_atm_lookup
     ON spx_atm (trade_date, quote_time, dte);
+
+-- Backwards-compatible column add for pre-existing deployments
+ALTER TABLE spx_atm
+    ADD COLUMN IF NOT EXISTS underlying_price DOUBLE PRECISION;
 
 -- ---------------------------------------------------------------------------
 -- Diagnostics: one row per expiry per snapshot
