@@ -250,9 +250,14 @@ def process_snapshot(
     enrich_surface_rows(surface_rows)
     enrich_atm_rows(atm_rows)
 
+    # Promote internal F → forward for storage
+    for row in surface_rows:
+        row["forward"] = row.get("F")
+
     # Strip internal-only fields before storage
     _surface_keep = {"trade_date", "quote_time", "dte", "put_delta",
-                     "iv", "price", "theta", "vega", "gamma"}
+                     "iv", "strike", "forward",
+                     "price", "theta", "vega", "gamma"}
     surface_rows = [{k: v for k, v in r.items() if k in _surface_keep}
                     for r in surface_rows]
 

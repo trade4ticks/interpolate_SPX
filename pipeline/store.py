@@ -101,17 +101,21 @@ def ensure_partitions(conn: psycopg2.extensions.connection, trade_date: str) -> 
 
 _SURFACE_UPSERT = """
 INSERT INTO spx_surface
-    (trade_date, quote_time, dte, put_delta, iv, price, theta, vega, gamma)
+    (trade_date, quote_time, dte, put_delta, iv, strike, forward,
+     price, theta, vega, gamma)
 VALUES
     (%(trade_date)s, %(quote_time)s, %(dte)s, %(put_delta)s,
-     %(iv)s, %(price)s, %(theta)s, %(vega)s, %(gamma)s)
+     %(iv)s, %(strike)s, %(forward)s,
+     %(price)s, %(theta)s, %(vega)s, %(gamma)s)
 ON CONFLICT (trade_date, quote_time, dte, put_delta)
 DO UPDATE SET
-    iv    = EXCLUDED.iv,
-    price = EXCLUDED.price,
-    theta = EXCLUDED.theta,
-    vega  = EXCLUDED.vega,
-    gamma = EXCLUDED.gamma
+    iv      = EXCLUDED.iv,
+    strike  = EXCLUDED.strike,
+    forward = EXCLUDED.forward,
+    price   = EXCLUDED.price,
+    theta   = EXCLUDED.theta,
+    vega    = EXCLUDED.vega,
+    gamma   = EXCLUDED.gamma
 """
 
 

@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS spx_surface (
     dte         SMALLINT         NOT NULL,
     put_delta   SMALLINT         NOT NULL,
     iv          DOUBLE PRECISION NOT NULL,
+    strike      DOUBLE PRECISION,
+    forward     DOUBLE PRECISION,
     price       DOUBLE PRECISION,
     theta       DOUBLE PRECISION,
     vega        DOUBLE PRECISION,
@@ -36,6 +38,12 @@ CREATE TABLE IF NOT EXISTS spx_surface (
 
 CREATE INDEX IF NOT EXISTS spx_surface_lookup
     ON spx_surface (trade_date, quote_time, dte, put_delta);
+
+-- Backwards-compatible column adds for pre-existing deployments
+ALTER TABLE spx_surface
+    ADD COLUMN IF NOT EXISTS strike  DOUBLE PRECISION;
+ALTER TABLE spx_surface
+    ADD COLUMN IF NOT EXISTS forward DOUBLE PRECISION;
 
 -- ---------------------------------------------------------------------------
 -- ATM table: true ATM point per (trade_date, quote_time, DTE)
