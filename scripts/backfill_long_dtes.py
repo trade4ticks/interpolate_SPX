@@ -39,10 +39,19 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
+def _prompt_date(prompt: str) -> date:
+    while True:
+        raw = input(prompt).strip()
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            print("  Invalid date — please use YYYY-MM-DD format.")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--start", required=True, help="Start date YYYY-MM-DD")
-    p.add_argument("--end",   required=True, help="End date YYYY-MM-DD")
+    p.add_argument("--start", help="Start date YYYY-MM-DD (prompted if omitted)")
+    p.add_argument("--end",   help="End date YYYY-MM-DD (prompted if omitted)")
     p.add_argument(
         "--dtes", default="180,270,360",
         help="Comma-separated target DTEs to recompute (default: 180,270,360)",
@@ -55,8 +64,13 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    start = date.fromisoformat(args.start)
-    end   = date.fromisoformat(args.end)
+    if not args.start or not args.end:
+        print("Long-DTE backfill — date range")
+        start = _prompt_date("  Start date (YYYY-MM-DD): ") if not args.start else date.fromisoformat(args.start)
+        end   = _prompt_date("  End date   (YYYY-MM-DD): ") if not args.end   else date.fromisoformat(args.end)
+    else:
+        start = date.fromisoformat(args.start)
+        end   = date.fromisoformat(args.end)
     if start > end:
         log.error("--start must be <= --end")
         sys.exit(1)
