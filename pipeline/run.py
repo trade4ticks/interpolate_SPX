@@ -175,23 +175,49 @@ def process_snapshot(
     snapshot_df: pd.DataFrame,
     snapshot_ts: pd.Timestamp,
     trade_date: date,
+    min_expiry_dte: int | None = None,
+    target_dtes: list[int] | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
     Process all expiries at a single snapshot timestamp.
+
+    AM expiries are admitted to the sampling pool only when no PM expiry
+    exists on the same calendar date. This avoids the same-date "different
+    clock" conflict on the front of the curve while picking up the AM-only
+    LEAPS that extend the long tail.
+
+    `min_expiry_dte` (optional): skip fitting any (expiry, session) group
+    whose calendar DTE from trade_date is below this value. Used by the
+    long-DTE backfill so we don't waste time fitting front-month expiries
+    that aren't needed to bracket the targeted long DTEs.
+
+    `target_dtes` (optional): override TARGET_DTES for this snapshot.
 
     Returns:
         surface_rows  — for spx_surface (with Greeks added)
         atm_rows      — for spx_atm
         diag_rows     — for spx_surface_diagnostics
     """
-    diag_rows:    list[dict]     = []
-    pm_fits:      list[FitResult] = []
-    all_fits:     list[tuple]    = []   # (fit, expiry, session, n_raw, n_clean)
+    diag_rows:      list[dict]      = []
+    sampling_fits:  list[FitResult] = []
+    all_fits:       list[tuple]     = []   # (fit, expiry, session, n_raw, n_clean)
+
+    # Determine which expiry dates have a PM session present in this snapshot
+    pm_expiry_dates = {
+        expiry_ts.date()
+        for (expiry_ts, session), _ in snapshot_df.groupby(["_expiry", "_session"])
+        if session == "PM"
+    }
 
     # Group by expiry+session and fit each independently
     for (expiry_ts, session), group in snapshot_df.groupby(["_expiry", "_session"]):
         expiry = expiry_ts.date()
         is_am  = (session == "AM")
+
+        # Optional DTE filter (used by long-DTE backfill)
+        if min_expiry_dte is not None:
+            if (expiry - trade_date).days < min_expiry_dte:
+                continue
 
         try:
             prepared = prepare_expiry(group, snapshot_ts, expiry_ts, is_am)
@@ -209,11 +235,15 @@ def process_snapshot(
 
         all_fits.append((fit, expiry, session, n_raw, n_clean))
 
-        if session == "PM" and not fit.skipped:
-            pm_fits.append(fit)
+        # Sampling pool: PM always; AM only when no same-date PM exists.
+        if not fit.skipped:
+            if session == "PM":
+                sampling_fits.append(fit)
+            elif session == "AM" and expiry not in pm_expiry_dates:
+                sampling_fits.append(fit)
 
-    # Calendar-arb check across PM fits (annotates each fit in-place)
-    annotate_calendar_arb(pm_fits)
+    # Calendar-arb check across the sampling pool (annotates each fit in-place)
+    annotate_calendar_arb(sampling_fits)
 
     quote_time = snapshot_ts.time()
 
@@ -231,9 +261,11 @@ def process_snapshot(
                             fit, n_raw, n_clean)
         )
 
-    # Sample surface using PM fits only
+    # Sample surface using the merged sampling pool (PM + non-overlapping AM)
     surface_rows, atm_rows = sample_surface(
-        pm_fits, target_dtes=TARGET_DTES, target_deltas=TARGET_DELTAS
+        sampling_fits,
+        target_dtes=target_dtes if target_dtes is not None else TARGET_DTES,
+        target_deltas=TARGET_DELTAS,
     )
 
     # quote_time already set above when building diag_rows
@@ -280,6 +312,9 @@ def process_date(
     conn: psycopg2.extensions.connection,
     atm_only: bool = False,
     diag_counts_by_qt=None,
+    min_expiry_dte: int | None = None,
+    target_dtes: list[int] | None = None,
+    write_diagnostics: bool = True,
 ) -> int:
     """
     Load all data for trade_date, iterate over snapshots, and write results.
@@ -344,7 +379,9 @@ def process_date(
 
         try:
             surface_rows, atm_rows, diag_rows = process_snapshot(
-                snap_df, snap_ts, trade_date
+                snap_df, snap_ts, trade_date,
+                min_expiry_dte=min_expiry_dte,
+                target_dtes=target_dtes,
             )
         except Exception as exc:
             logger.error("Snapshot %s failed unexpectedly: %s", ts, exc)
@@ -352,7 +389,8 @@ def process_date(
 
         if not atm_only:
             upsert_surface(conn, surface_rows)
-            upsert_diagnostics(conn, diag_rows)
+            if write_diagnostics:
+                upsert_diagnostics(conn, diag_rows)
         upsert_atm(conn, atm_rows)
 
         total_surface += len(surface_rows)
