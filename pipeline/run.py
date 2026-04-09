@@ -279,25 +279,41 @@ def process_date(
     trade_date: date,
     conn: psycopg2.extensions.connection,
     atm_only: bool = False,
-) -> None:
+    since_quote_time=None,
+) -> int:
     """
     Load all data for trade_date, iterate over snapshots, and write results.
+
+    If `since_quote_time` is provided, only snapshots with quote_time strictly
+    greater than it are processed (used by the intraday cron to skip work
+    that's already in the DB). Returns the number of snapshots processed.
     """
     logger.info("Processing %s", trade_date.isoformat())
 
     entries = discover_trade_date(trade_date)
     if not entries:
         logger.warning("No parquet files found for %s", trade_date.isoformat())
-        return
+        return 0
 
     combined = load_trade_date(entries)
     if combined.empty:
         logger.warning("All files empty for %s", trade_date.isoformat())
-        return
+        return 0
 
     ensure_partitions(conn, trade_date.isoformat())
 
     timestamps = sorted(combined["_ts"].unique())
+
+    if since_quote_time is not None:
+        cutoff = pd.Timestamp(f"{trade_date.isoformat()} {since_quote_time}")
+        before = len(timestamps)
+        timestamps = [ts for ts in timestamps if pd.Timestamp(ts) > cutoff]
+        logger.info("  Skipping %d snapshots already processed (quote_time <= %s)",
+                    before - len(timestamps), since_quote_time)
+        if not timestamps:
+            logger.info("  Nothing new to process.")
+            return 0
+
     logger.info("  %d snapshots, %d expiry/session combos",
                 len(timestamps), combined.groupby(["_expiry", "_session"]).ngroups)
 
@@ -324,6 +340,7 @@ def process_date(
         total_atm     += len(atm_rows)
 
     logger.info("  Done: %d surface rows, %d ATM rows", total_surface, total_atm)
+    return len(timestamps)
 
 
 # ---------------------------------------------------------------------------
