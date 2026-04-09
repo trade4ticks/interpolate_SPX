@@ -279,14 +279,16 @@ def process_date(
     trade_date: date,
     conn: psycopg2.extensions.connection,
     atm_only: bool = False,
-    since_quote_time=None,
+    skip_quote_times=None,
 ) -> int:
     """
     Load all data for trade_date, iterate over snapshots, and write results.
 
-    If `since_quote_time` is provided, only snapshots with quote_time strictly
-    greater than it are processed (used by the intraday cron to skip work
-    that's already in the DB). Returns the number of snapshots processed.
+    If `skip_quote_times` is provided (an iterable of `time` objects), any
+    snapshot whose quote_time is in that set is skipped. Used by the intraday
+    cron so already-processed bars are not re-fit, while still allowing
+    late-arriving bars *below* the current max to be filled in on a later
+    run. Returns the number of snapshots processed.
     """
     logger.info("Processing %s", trade_date.isoformat())
 
@@ -304,12 +306,13 @@ def process_date(
 
     timestamps = sorted(combined["_ts"].unique())
 
-    if since_quote_time is not None:
-        cutoff = pd.Timestamp(f"{trade_date.isoformat()} {since_quote_time}")
+    if skip_quote_times:
+        skip_set = set(skip_quote_times)
         before = len(timestamps)
-        timestamps = [ts for ts in timestamps if pd.Timestamp(ts) > cutoff]
-        logger.info("  Skipping %d snapshots already processed (quote_time <= %s)",
-                    before - len(timestamps), since_quote_time)
+        timestamps = [ts for ts in timestamps
+                      if pd.Timestamp(ts).time() not in skip_set]
+        logger.info("  Skipping %d snapshots already in DB",
+                    before - len(timestamps))
         if not timestamps:
             logger.info("  Nothing new to process.")
             return 0

@@ -67,22 +67,23 @@ def main() -> None:
     log.info("Intraday run for %s", today.isoformat())
 
     with get_connection() as conn:
-        # Find the latest snapshot already in the DB for today so we only
-        # process new bars (a full day takes ~6 min; this keeps each cron
-        # run to seconds).
+        # Pull the SET of quote_times already in the DB for today and skip
+        # exactly those. Using a set (rather than MAX) lets late-arriving
+        # snapshots from steps 1/2 be filled in on a later run instead of
+        # being permanently skipped because something above them landed
+        # first.
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT MAX(quote_time) FROM spx_surface_diagnostics "
+                "SELECT DISTINCT quote_time FROM spx_surface_diagnostics "
                 "WHERE trade_date = %s",
                 (today,),
             )
-            row = cur.fetchone()
-        latest_qt = row[0] if row else None
-        if latest_qt is not None:
-            log.info("Latest processed quote_time for today: %s", latest_qt)
+            done_qts = {r[0] for r in cur.fetchall()}
+        log.info("Already in DB: %d snapshots for %s",
+                 len(done_qts), today.isoformat())
 
         try:
-            process_date(today, conn, since_quote_time=latest_qt)
+            process_date(today, conn, skip_quote_times=done_qts)
         except Exception as exc:
             log.error("process_date(%s) failed: %s", today.isoformat(), exc)
             sys.exit(1)
