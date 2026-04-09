@@ -41,7 +41,7 @@ _ET = pytz.timezone("US/Eastern")
 # snapshot from step-2 is available; allow a tail past the close to catch the
 # final bar.
 _OPEN_TIME  = time(9, 35)
-_CLOSE_TIME = time(16, 5)
+_CLOSE_TIME = time(17, 0)
 
 
 def _is_trading_day_et(now_et: datetime) -> bool:
