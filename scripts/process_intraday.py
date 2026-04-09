@@ -67,23 +67,24 @@ def main() -> None:
     log.info("Intraday run for %s", today.isoformat())
 
     with get_connection() as conn:
-        # Pull the SET of quote_times already in the DB for today and skip
-        # exactly those. Using a set (rather than MAX) lets late-arriving
-        # snapshots from steps 1/2 be filled in on a later run instead of
-        # being permanently skipped because something above them landed
-        # first.
+        # Pull diagnostics row counts per quote_time. process_date compares
+        # this to the (expiry, session) group count currently in the parquet
+        # so a snapshot is only skipped when *all* expiries on disk are
+        # already in the DB. This handles the common case where steps 1/2
+        # are still writing additional expiries for a snapshot we already
+        # partially processed.
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT DISTINCT quote_time FROM spx_surface_diagnostics "
-                "WHERE trade_date = %s",
+                "SELECT quote_time, COUNT(*) FROM spx_surface_diagnostics "
+                "WHERE trade_date = %s GROUP BY quote_time",
                 (today,),
             )
-            done_qts = {r[0] for r in cur.fetchall()}
+            diag_counts = {r[0]: r[1] for r in cur.fetchall()}
         log.info("Already in DB: %d snapshots for %s",
-                 len(done_qts), today.isoformat())
+                 len(diag_counts), today.isoformat())
 
         try:
-            process_date(today, conn, skip_quote_times=done_qts)
+            process_date(today, conn, diag_counts_by_qt=diag_counts)
         except Exception as exc:
             log.error("process_date(%s) failed: %s", today.isoformat(), exc)
             sys.exit(1)

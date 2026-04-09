@@ -279,16 +279,18 @@ def process_date(
     trade_date: date,
     conn: psycopg2.extensions.connection,
     atm_only: bool = False,
-    skip_quote_times=None,
+    diag_counts_by_qt=None,
 ) -> int:
     """
     Load all data for trade_date, iterate over snapshots, and write results.
 
-    If `skip_quote_times` is provided (an iterable of `time` objects), any
-    snapshot whose quote_time is in that set is skipped. Used by the intraday
-    cron so already-processed bars are not re-fit, while still allowing
-    late-arriving bars *below* the current max to be filled in on a later
-    run. Returns the number of snapshots processed.
+    If `diag_counts_by_qt` is provided (mapping `time` -> int count of
+    diagnostics rows already in the DB for that quote_time), a snapshot is
+    skipped only when the count matches the number of (expiry, session)
+    groups currently present in the parquet. This lets the intraday cron
+    avoid reprocessing complete snapshots while still revisiting snapshots
+    where additional expiries have since landed on disk. Returns the number
+    of snapshots processed.
     """
     logger.info("Processing %s", trade_date.isoformat())
 
@@ -306,13 +308,27 @@ def process_date(
 
     timestamps = sorted(combined["_ts"].unique())
 
-    if skip_quote_times:
-        skip_set = set(skip_quote_times)
+    if diag_counts_by_qt:
+        # Count current (expiry, session) groups per snapshot in the parquet.
+        # Skip a snapshot only when the diagnostics row count for that
+        # quote_time already matches — otherwise new expiries have landed
+        # since the last run and we need to reprocess (upsert overwrites).
+        per_ts_groups = (combined.groupby("_ts")[["_expiry", "_session"]]
+                                 .apply(lambda g: g.drop_duplicates().shape[0])
+                                 .to_dict())
         before = len(timestamps)
-        timestamps = [ts for ts in timestamps
-                      if pd.Timestamp(ts).time() not in skip_set]
-        logger.info("  Skipping %d snapshots already in DB",
-                    before - len(timestamps))
+        kept = []
+        for ts in timestamps:
+            qt = pd.Timestamp(ts).time()
+            n_disk = per_ts_groups.get(ts, 0)
+            n_db = diag_counts_by_qt.get(qt, 0)
+            if n_db >= n_disk and n_db > 0:
+                continue
+            kept.append(ts)
+        timestamps = kept
+        logger.info("  Skipping %d complete snapshots already in DB; "
+                    "%d snapshots to (re)process",
+                    before - len(timestamps), len(timestamps))
         if not timestamps:
             logger.info("  Nothing new to process.")
             return 0
