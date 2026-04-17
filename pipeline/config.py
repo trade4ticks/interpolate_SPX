@@ -14,7 +14,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Paths and database
 # ---------------------------------------------------------------------------
-DATA_ROOT = Path(os.environ.get("SPX_DATA_ROOT", "/data/spx_options"))
+DATA_ROOT = Path(os.environ.get("SPX_DATA_ROOT", "/mnt/volume1/spx_options"))
 DB_URL = os.environ.get("SPX_DB_URL", "postgresql://user:password@localhost:5432/spx")
 
 # ---------------------------------------------------------------------------
