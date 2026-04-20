@@ -2,7 +2,7 @@
 Pipeline entry point.
 
 File discovery (folders use YYYYMMDD format, no dashes — matches step-1/2 output):
-    DATA_ROOT/
+    DATA_ROOTS[n]/
         YYYYMMDD/             ← trade_date
             YYYYMMDD/         ← expiry
                 PM.parquet    ← session (SPXW weeklies / PM-settled monthlies)
@@ -41,7 +41,7 @@ import pandas as pd
 import psycopg2
 
 from .clean import prepare_expiry
-from .config import COLS, DATA_ROOT, TARGET_DELTAS, TARGET_DTES
+from .config import COLS, DATA_ROOT, DATA_ROOTS, TARGET_DELTAS, TARGET_DTES
 
 _UNDERLYING_COL = COLS["underlying_price"]
 from .fit import FitResult, annotate_calendar_arb, fit_smile
@@ -66,14 +66,25 @@ logger = logging.getLogger(__name__)
 
 def discover_trade_date(trade_date: date) -> list[dict]:
     """
-    Scan DATA_ROOT/<YYYYMMDD>/ and return a list of dicts:
+    Scan DATA_ROOTS for <YYYYMMDD>/ and return a list of dicts:
         { "expiry": date, "session": "AM"|"PM", "path": Path }
+
+    Searches each root in DATA_ROOTS in order; returns results from the
+    first root that contains a matching trade-date directory.
 
     Folder names use compact YYYYMMDD format (no dashes), matching the
     step-1 (Thetadata_Raw_SPX) and step-2 (clean_SPX) output layout.
     """
-    trade_dir = DATA_ROOT / trade_date.strftime("%Y%m%d")
-    if not trade_dir.is_dir():
+    date_str = trade_date.strftime("%Y%m%d")
+
+    trade_dir = None
+    for root in DATA_ROOTS:
+        candidate = root / date_str
+        if candidate.is_dir():
+            trade_dir = candidate
+            break
+
+    if trade_dir is None:
         return []
 
     entries = []

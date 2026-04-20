@@ -14,7 +14,19 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Paths and database
 # ---------------------------------------------------------------------------
-DATA_ROOT = Path(os.environ.get("SPX_DATA_ROOT", "/mnt/volume1/spx_options"))
+# Comma-separated list of data roots to search for trade-date parquet folders.
+# The first root that contains a matching YYYYMMDD directory wins.
+DATA_ROOTS: list[Path] = [
+    Path(p.strip())
+    for p in os.environ.get(
+        "SPX_DATA_ROOTS",
+        os.environ.get("SPX_DATA_ROOT", "/mnt/volume1/spx_options"),
+    ).split(",")
+]
+
+# Backwards compat: single DATA_ROOT still used in a few places — points to first entry.
+DATA_ROOT = DATA_ROOTS[0]
+
 DB_URL = os.environ.get("SPX_DB_URL", "postgresql://user:password@localhost:5432/spx")
 
 # ---------------------------------------------------------------------------
