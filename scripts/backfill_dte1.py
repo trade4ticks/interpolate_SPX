@@ -17,6 +17,9 @@ NOT written (a partial fit set would corrupt the existing diagnostics
 row counts), so the intraday cron's "complete snapshot" check still works.
 
 Usage:
+    # Prompts for start and end dates when omitted
+    python scripts/backfill_dte1.py
+
     # Tue/Thu only over the no-same-day-expiry window (default weekdays)
     python scripts/backfill_dte1.py --start 2021-01-01 --end 2022-05-11
 
@@ -50,6 +53,15 @@ log = logging.getLogger(__name__)
 _WEEKDAY_MAP = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4}
 
 
+def _prompt_date(prompt: str) -> date:
+    while True:
+        raw = input(prompt).strip()
+        try:
+            return date.fromisoformat(raw)
+        except ValueError:
+            print("  Invalid date — please use YYYY-MM-DD format.")
+
+
 def _parse_weekdays(spec: str) -> set[int]:
     spec = spec.strip().lower()
     if spec == "all":
@@ -67,8 +79,8 @@ def _parse_weekdays(spec: str) -> set[int]:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--start", required=True, help="Start date YYYY-MM-DD (inclusive)")
-    p.add_argument("--end",   required=True, help="End date YYYY-MM-DD (inclusive)")
+    p.add_argument("--start", help="Start date YYYY-MM-DD (prompted if omitted)")
+    p.add_argument("--end",   help="End date YYYY-MM-DD (prompted if omitted)")
     p.add_argument(
         "--weekdays", default="tue,thu",
         help="Comma-separated weekdays to process: mon,tue,wed,thu,fri, "
@@ -82,10 +94,18 @@ def main() -> None:
     )
     args = p.parse_args()
 
-    start = date.fromisoformat(args.start)
-    end   = date.fromisoformat(args.end)
+    if not args.start or not args.end:
+        print("Short-DTE backfill — date range")
+        start = (date.fromisoformat(args.start) if args.start
+                 else _prompt_date("  Start date (YYYY-MM-DD): "))
+        end   = (date.fromisoformat(args.end) if args.end
+                 else _prompt_date("  End date   (YYYY-MM-DD): "))
+    else:
+        start = date.fromisoformat(args.start)
+        end   = date.fromisoformat(args.end)
+
     if start > end:
-        log.error("--start must be <= --end")
+        log.error("start must be <= end")
         sys.exit(1)
 
     try:
