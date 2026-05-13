@@ -187,6 +187,7 @@ def process_snapshot(
     snapshot_ts: pd.Timestamp,
     trade_date: date,
     min_expiry_dte: int | None = None,
+    max_expiry_dte: int | None = None,
     target_dtes: list[int] | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
@@ -201,6 +202,11 @@ def process_snapshot(
     whose calendar DTE from trade_date is below this value. Used by the
     long-DTE backfill so we don't waste time fitting front-month expiries
     that aren't needed to bracket the targeted long DTEs.
+
+    `max_expiry_dte` (optional): skip fitting any (expiry, session) group
+    whose calendar DTE from trade_date is above this value. Used by the
+    short-DTE backfill so we don't waste time fitting back-month expiries
+    that aren't needed to bracket the targeted short DTEs.
 
     `target_dtes` (optional): override TARGET_DTES for this snapshot.
 
@@ -225,9 +231,12 @@ def process_snapshot(
         expiry = expiry_ts.date()
         is_am  = (session == "AM")
 
-        # Optional DTE filter (used by long-DTE backfill)
+        # Optional DTE filters (used by long-DTE and short-DTE backfills)
         if min_expiry_dte is not None:
             if (expiry - trade_date).days < min_expiry_dte:
+                continue
+        if max_expiry_dte is not None:
+            if (expiry - trade_date).days > max_expiry_dte:
                 continue
 
         try:
@@ -324,6 +333,7 @@ def process_date(
     atm_only: bool = False,
     diag_counts_by_qt=None,
     min_expiry_dte: int | None = None,
+    max_expiry_dte: int | None = None,
     target_dtes: list[int] | None = None,
     write_diagnostics: bool = True,
 ) -> int:
@@ -392,6 +402,7 @@ def process_date(
             surface_rows, atm_rows, diag_rows = process_snapshot(
                 snap_df, snap_ts, trade_date,
                 min_expiry_dte=min_expiry_dte,
+                max_expiry_dte=max_expiry_dte,
                 target_dtes=target_dtes,
             )
         except Exception as exc:

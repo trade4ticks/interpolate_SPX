@@ -240,9 +240,13 @@ def sample_surface(
     excluded upstream in run.py when building the fits list).
 
     For each target DTE:
-      - Find the two PM fits that bracket it in T-space
-      - Skip if no bracket exists (no extrapolation)
-      - Build an InterpolatedSmile and solve the delta/ATM grids
+      - If a pair of fits brackets it in T-space, build an InterpolatedSmile.
+      - If the target T is below the nearest available fit (no bracket from
+        below), only the single closest bucket gets a DirectSmile row using
+        the nearest fit; smaller buckets are skipped. This emits dte=0 on
+        days with a same-day expiry (Mon/Wed/Fri 2021, all weekdays
+        post-May-2022), and emits dte=1 — not a misleading dte=0 — on
+        Tue/Thu in 2021 where the nearest PM is the next day.
 
     Returns:
         surface_rows  — list of dicts for spx_surface
@@ -254,19 +258,34 @@ def sample_surface(
     if len(usable) < 2:
         return [], []
 
+    # Pick the bucket that absorbs the nearest-expiry fallback when no
+    # bracket-from-below exists: the largest target_dte whose nominal T
+    # sits below usable[0].T. target_dtes is ascending so we can stop at
+    # the first one that isn't strictly below.
+    nearest_T = usable[0].T
+    fallback_bucket: Optional[int] = None
+    for d in target_dtes:
+        if d / 365.0 < nearest_T:
+            fallback_bucket = d
+        else:
+            break
+
     surface_rows: list[dict] = []
     atm_rows:     list[dict] = []
 
     for dte_int in target_dtes:
+        target_T = dte_int / 365.0
+        smile: DirectSmile | InterpolatedSmile
 
-        # 0 DTE: use the nearest (same-day) expiry directly — no time interpolation.
-        # Its actual T changes throughout the day as expiry approaches.
-        if dte_int == 0:
-            smile: DirectSmile | InterpolatedSmile = DirectSmile(usable[0])
+        if target_T < nearest_T:
+            # No bracket from below — only the fallback bucket emits a row,
+            # using the nearest fit directly. Its T drifts through the day
+            # as that expiry approaches.
+            if dte_int != fallback_bucket:
+                continue
+            smile = DirectSmile(usable[0])
             target_T = smile.target_T
         else:
-            target_T = dte_int / 365.0   # calendar days convention
-
             # Find bracketing pair
             lo: Optional[FitResult] = None
             hi: Optional[FitResult] = None
@@ -278,7 +297,7 @@ def sample_surface(
                     break
 
             if lo is None or hi is None:
-                continue   # no bracket — skip this DTE
+                continue   # no bracket from above — skip this DTE
 
             smile = InterpolatedSmile(lo, hi, target_T)
 
